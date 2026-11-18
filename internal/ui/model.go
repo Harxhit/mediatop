@@ -10,13 +10,20 @@ import (
 )
 
 type Model struct {
-	cpuUsage float64
-	cpuError string
-	width    int
-	height   int
+	cpuUsage    float64
+	cpuError    string
+	width       int
+	height      int
+	memoryUsage float64
+	memoryError string
 }
 
 type cpuUsageMsg struct {
+	usage float64
+	err   error
+}
+
+type memoryUsageMsg struct {
 	usage float64
 	err   error
 }
@@ -53,7 +60,7 @@ var (
 )
 
 func (m Model) Init() tea.Cmd {
-	return fetchCPU()
+	return tea.Batch(fetchCPU(), fetchMemory())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -78,6 +85,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cpuError = ""
 		m.cpuUsage = msg.usage
 		return m, fetchCPU()
+
+	case memoryUsageMsg:
+		if msg.err != nil {
+			m.memoryError = msg.err.Error()
+			return m, fetchMemory()
+		}
+
+		m.memoryError = ""
+		m.memoryUsage = msg.usage
+		return m, fetchMemory()
 	}
 
 	return m, nil
@@ -135,7 +152,20 @@ func (m Model) View() string {
 		labelStyle.Render("Aggregate CPU  •  All logical processors"),
 	)
 
-	panel := panelStyle.Width(width - 6).Render(cpuPanel)
+	memoryPanel := lipgloss.JoinVertical(
+		lipgloss.Left,
+		labelStyle.Render("MEMORY UTILIZATION"),
+		"",
+		valueStyle.Render(fmt.Sprintf("%.2f%%", m.memoryUsage)),
+		"",
+		labelStyle.Render("RAM  •  Used / Available"),
+	)
+
+	panel := lipgloss.JoinVertical(
+		lipgloss.Left,
+		panelStyle.Width(width-6).Render(cpuPanel),
+		panelStyle.Width(width-6).Render(memoryPanel),
+	)
 
 	footer := footerStyle.Render("q: quit    •    Refresh: 1s")
 
@@ -166,6 +196,22 @@ func fetchCPU() tea.Cmd {
 		usage := system.CalculateCPUutilization(cpuStats.Idle, delta)
 
 		return cpuUsageMsg{
+			usage: usage,
+		}
+	}
+}
+
+func fetchMemory() tea.Cmd {
+	return func() tea.Msg {
+		stats, err := system.ReadMemoryStats()
+
+		if err != nil {
+			return memoryUsageMsg{err: err}
+		}
+
+		usage := system.CalculateMemoryUsage(stats)
+
+		return memoryUsageMsg{
 			usage: usage,
 		}
 	}
