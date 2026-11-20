@@ -1,21 +1,28 @@
 package ui
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/Harxhit/mediatop/internal/system"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type Model struct {
-	cpuUsage    float64
-	cpuError    string
-	width       int
-	height      int
-	memoryUsage float64
-	memoryError string
+	cpuUsage     float64
+	cpuError     string
+	width        int
+	height       int
+	memoryUsage  float64
+	memoryError  string
+	networkRates []system.NetworkRate
+	networkError string
+
+	selected int
+	sortBy   sortKey
+	paused   bool
+
+	cpuHist []float64
+	memHist []float64
+	rxHist  []float64
+	txHist  []float64
 }
 
 type cpuUsageMsg struct {
@@ -28,39 +35,13 @@ type memoryUsageMsg struct {
 	err   error
 }
 
-var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#7DD3FC"))
-
-	statusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#4ADE80")).
-			Bold(true)
-
-	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#475569")).
-			Padding(1, 2)
-
-	labelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#94A3B8"))
-
-	valueStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#F8FAFC"))
-
-	footerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#64748B"))
-
-	barActive = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#38BDF8"))
-
-	barInactive = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#334155"))
-)
+type networkUsageMsg struct {
+	rates []system.NetworkRate
+	err   error
+}
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(fetchCPU(), fetchMemory())
+	return tea.Batch(fetchCPU(), fetchMemory(), fetchNetwork(), Tick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -72,117 +53,76 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		switch msg.String() {
+		case "ctrl+c", "q", "f10":
 			return m, tea.Quit
+		case "up", "k":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.selected < len(m.networkRates)-1 {
+				m.selected++
+			}
+		case "s":
+			name := SelectedName(m.networkRates, m.selected)
+			m.sortBy = (m.sortBy + 1) % sortKeyCount
+			SortRates(m.networkRates, m.sortBy)
+			m.selected = IndexOf(m.networkRates, name, m.selected)
+		case "p", " ":
+			m.paused = !m.paused
 		}
+		return m, nil
+
+	case tickMsg:
+		if m.paused {
+			return m, Tick()
+		}
+		return m, tea.Batch(fetchCPU(), fetchMemory(), fetchNetwork(), Tick())
 
 	case cpuUsageMsg:
 		if msg.err != nil {
 			m.cpuError = msg.err.Error()
-			return m, fetchCPU()
+			return m, nil
 		}
-
 		m.cpuError = ""
 		m.cpuUsage = msg.usage
-		return m, fetchCPU()
+		m.cpuHist = AppendHist(m.cpuHist, msg.usage)
+		return m, nil
 
 	case memoryUsageMsg:
 		if msg.err != nil {
 			m.memoryError = msg.err.Error()
-			return m, fetchMemory()
+			return m, nil
 		}
-
 		m.memoryError = ""
 		m.memoryUsage = msg.usage
-		return m, fetchMemory()
+		m.memHist = AppendHist(m.memHist, msg.usage)
+		return m, nil
+
+	case networkUsageMsg:
+		if msg.err != nil {
+			m.networkError = msg.err.Error()
+			return m, nil
+		}
+		m.networkError = ""
+
+		name := SelectedName(m.networkRates, m.selected)
+		SortRates(msg.rates, m.sortBy)
+		m.networkRates = msg.rates
+		m.selected = IndexOf(m.networkRates, name, m.selected)
+
+		var rx, tx float64
+		for _, r := range m.networkRates {
+			rx += float64(r.RXBytesPerSec)
+			tx += float64(r.TXBytesPerSec)
+		}
+		m.rxHist = AppendHist(m.rxHist, rx)
+		m.txHist = AppendHist(m.txHist, tx)
+		return m, nil
 	}
 
 	return m, nil
-}
-
-func (m Model) View() string {
-	width := m.width - 4
-	if width < 40 {
-		width = 40
-	}
-	if width > 90 {
-		width = 90
-	}
-
-	header := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		titleStyle.Render("MEDIATOP"),
-		"    ",
-		statusStyle.Render("● LIVE"),
-	)
-
-	barWidth := width - 18
-	if barWidth < 10 {
-		barWidth = 10
-	}
-	if barWidth > 55 {
-		barWidth = 55
-	}
-
-	usage := m.cpuUsage
-	if usage < 0 {
-		usage = 0
-	}
-	if usage > 100 {
-		usage = 100
-	}
-
-	filled := int(float64(barWidth) * usage / 100)
-	empty := barWidth - filled
-
-	bar := barActive.Render(strings.Repeat("█", filled)) +
-		barInactive.Render(strings.Repeat("░", empty))
-
-	cpuPanel := lipgloss.JoinVertical(
-		lipgloss.Left,
-		labelStyle.Render("CPU UTILIZATION"),
-		"",
-		lipgloss.JoinHorizontal(
-			lipgloss.Center,
-			valueStyle.Render(fmt.Sprintf("%.2f%%", m.cpuUsage)),
-			"   ",
-			bar,
-		),
-		"",
-		labelStyle.Render("Aggregate CPU  •  All logical processors"),
-	)
-
-	memoryPanel := lipgloss.JoinVertical(
-		lipgloss.Left,
-		labelStyle.Render("MEMORY UTILIZATION"),
-		"",
-		valueStyle.Render(fmt.Sprintf("%.2f%%", m.memoryUsage)),
-		"",
-		labelStyle.Render("RAM  •  Used / Available"),
-	)
-
-	panel := lipgloss.JoinVertical(
-		lipgloss.Left,
-		panelStyle.Width(width-6).Render(cpuPanel),
-		panelStyle.Width(width-6).Render(memoryPanel),
-	)
-
-	footer := footerStyle.Render("q: quit    •    Refresh: 1s")
-
-	if m.cpuError != "" {
-		footer = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F87171")).
-			Render("CPU ERROR: " + m.cpuError)
-	}
-
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		"",
-		panel,
-		"",
-		footer,
-	)
 }
 
 func fetchCPU() tea.Cmd {
@@ -195,24 +135,28 @@ func fetchCPU() tea.Cmd {
 		delta := system.CalculateTotalDelta(cpuStats)
 		usage := system.CalculateCPUutilization(cpuStats.Idle, delta)
 
-		return cpuUsageMsg{
-			usage: usage,
-		}
+		return cpuUsageMsg{usage: usage}
 	}
 }
 
 func fetchMemory() tea.Cmd {
 	return func() tea.Msg {
 		stats, err := system.ReadMemoryStats()
-
 		if err != nil {
 			return memoryUsageMsg{err: err}
 		}
 
-		usage := system.CalculateMemoryUsage(stats)
+		return memoryUsageMsg{usage: system.CalculateMemoryUsage(stats)}
+	}
+}
 
-		return memoryUsageMsg{
-			usage: usage,
+func fetchNetwork() tea.Cmd {
+	return func() tea.Msg {
+		rates, err := system.ReadNetworkRates()
+		if err != nil {
+			return networkUsageMsg{err: err}
 		}
+
+		return networkUsageMsg{rates: rates}
 	}
 }
